@@ -1,0 +1,607 @@
+---
+title: "Bike Demand - Regression Analysis"
+author: "vincentole"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  pdf_document:
+    highlight: breezedark
+    toc: yes
+    toc_depth: 2
+    number_sections: yes
+    df_print: kable
+urlcolor: blue
+---
+
+```{=latex}
+% Adding background color to inline code
+
+\definecolor{codebg}{HTML}{eeeeee}
+\definecolor{codetext}{HTML}{000000}
+\let\textttOrig\texttt
+\renewcommand{\texttt}[1]{\textttOrig{\colorbox{codebg}{\textcolor{codetext}{#1}}}}
+```
+
+
+# Predicting Bike Sharing Demand
+
+The data is taken from the [Kaggle Challenge - Bike Sharing Demand](https://www.kaggle.com/c/bike-sharing-demand/data).
+
+The goal is to predict daily demand on bike share rentals (**count**) using the data set with the following columns:
+
+-   **datetime** - hourly date + timestamp
+-   **season** - 1 = spring, 2 = summer, 3 = fall, 4 = winter
+-   **holiday** - whether the day is considered a holiday
+-   **workingday** - whether the day is neither a weekend nor holiday
+-   **weather** - 1: Clear, Few clouds, Partly cloudy, Partly cloudy; 2: Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist; 3: Light Snow, Light Rain + Thunderstorm + Scattered clouds, Light Rain + Scattered clouds; 4: Heavy Rain + Ice Pallets + Thunderstorm + Mist, Snow + Fog
+-   **temp** - temperature in Celsius
+-   **atemp** - "feels like" temperature in Celsius
+-   **humidity** - relative humidity
+-   **windspeed** - wind speed
+
+The number of riders (**count**) is split between casual and registered. We will concentrate on `count`.
+
+-   **casual** - number of non-registered user rentals initiated
+-   **registered** - number of registered user rentals initiated
+-   **count** - number of total rentals
+
+## Load the Data
+
+First we load the data:
+
+```{r, message = FALSE}
+# Load packages
+library(lubridate)
+library(GGally)
+library(tidyverse)
+
+# Load train data (train.csv)
+data <- read_csv("train.csv")
+
+# Load test data (test.csv)
+test <- read_csv("test.csv")
+
+# Load the file "sampleSubmission.csv" to check submission format. 
+submission <- read_csv("sampleSubmission.csv")
+
+```  
+  
+Next we check the file structure.
+  
+  
+Files structure of `data`:
+  
+```{r}
+glimpse(data)
+```
+  
+  
+File structure of `test`:
+   
+```{r}
+glimpse(test)
+```
+   
+   
+File structure of `submission`:
+  
+```{r}
+glimpse(submission)
+```
+  
+  
+Further, we check if all columns are the the same for the train and test data:
+  
+```{r}
+# Remove additional features from train data
+data <- data %>% select(-casual,-registered)
+# Confirm that variables are identical
+cat("Train: ", names(data), "\n", "Test: ", names(test))
+
+# Attatch data
+attach(data)
+```
+
+**Classification vs. Regression**
+
+What is the difference between a regression problem and a classification problem?
+
+**Answer:** Regression problems fit a model with the objective of estimating a quantitative (continuous or discrete) outcome variable. Classification problems fit a model with the objective of estimating a categorical outcome variable. Graphically this means that classification tries to separate the data into groups, while regression tries to fit a model close to the data. Since we try to predict the bike demand (count), which is a discrete variable, the problem at hand is a regression problem.
+
+## Data Preparation
+
+Next we will do some feature engineering and data preparation.
+
+```{r}
+# Function to extract the year from datetime
+year_get <- function(dtetime) {
+  year <- as.integer(map(strsplit( as.character(dtetime), "-"), 1))
+  return(year)
+}
+
+
+# Extract year from the datetime
+data$year <- sapply(data$datetime, year_get)
+test$year <- sapply(test$datetime, year_get)
+
+```
+
+```{r}
+# Extract "month", "hour" (0-23), and "weekday" (1-7) from datetime 
+data <- data %>% mutate(month = as.integer( month(datetime) ), 
+                        hour = as.integer( hour(datetime) ),
+                        weekday = as.integer( wday(datetime,
+                          week_start = getOption("lubridate.week.start", 1)) ))
+
+test <- test %>% mutate(month = as.integer( month(datetime) ), 
+                        hour = as.integer( hour(datetime) ),
+                        weekday = as.integer( wday(datetime, 
+                          week_start = getOption("lubridate.week.start", 1)) ))
+
+
+
+
+# Make sure that "datetime" is of the type "POSIXct" "POSIXt" in both 
+# "data" and "test" data frames. 
+class(data$datetime)
+class(test$datetime)
+
+```
+
+Next we make sure that the following categorical variables are of the type "factor":
+
+-   season
+-   holiday
+-   workingday
+-   weather
+-   year
+-   month
+-   hour
+-   weekday
+
+```{r}
+# Create a vector with the names of categorical variables we want 
+# to transform to factor.
+categorical <- c("season", "holiday", "workingday",
+                 "weather", "year", "month", "hour", "weekday")
+
+# Transform categorical variables into factors
+data[categorical] <- lapply(data[categorical], factor)
+test[categorical] <- lapply(test[categorical], factor)
+```
+
+## Exploring the Data
+
+Now we will concentrate on the train part of the data which we have stored as a "data" data frame. To get a better grasp of the problem, we will start from visualizing the dependent variable "count".
+
+```{r}
+# First we inspect the dependent variable
+plot_data <- data %>% filter(datetime < as.Date(datetime[1]) + 10)
+ggplot(plot_data, aes(x = datetime, y = count)) +
+  geom_line() +
+  labs(title = "Time series of the count variable", x = "")
+```
+
+
+**Plot Interpretation**
+
+What do we learn from this plot?
+
+**Answer:** We can clearly identify a cyclical pattern. The first pattern is between weekdays and weekends, whereas on weekends the total count of bike rentals seems to be lower than on weekdays. The second pattern can be observed during each day. During the night there are almost no rentals. We can see a first peak in the morning, after which the level returns to an intermediate level. In the evening there is a second peak, after which the level falls towards zero rentals for the night. This daily distribution changes on the weekend, where there is only one peak during the middle of the day.
+
+A first interpretation would be, that the bike rentals seem to follow the working day rush hour cycle during the week, while there is an average level of rentals throughout the day. On weekends, people sleep longer and use the bike throughout the day for trips etc.
+
+Now, say we want to understand how the total number of bike rentals depends on the weather type. One way to gain some insight about this dependence is to use conditioned box plots.
+
+```{r}
+# Obtain a set of box plots for the variable "count", for each value 
+# of the variable "weather".
+# To add more information on the distribution, a violin plot is added as well.
+ggplot(data, aes(x = weather, y = count)) +
+  geom_boxplot() +
+  geom_violin(alpha = 0.1, fill = "black", color = "#00000033") +
+  labs(title = "Box plots of count for each weather category")
+```
+
+
+**Box Plot Interpretation**
+
+What do we learn from these box plots?
+
+**Answer:** The box plots show that weather seems to have an effect on the bike rents per hour. Most notably, during extremely bad weather, on first glance, there appear only very few bike rentals (164, see below), however, from the table below we can see that there is only one observation. Thus we cannot draw conclusions for very bad weather (`4`). Still, There seems to be a clear aversion of (light) rain, indicated by the lower 75% quantile and media of `3` compared to `1` and `2`. From the violin plot we can also see a clear difference between the distributions. For rainy weather (`3`), the bulk of hours shows low bike rentals and only few hours show some higher rentals. This indicates that the peak hours might be distributed differently. We will have a look at this below. The distributions between sunny and cloudy weather (`1` vs `2`) does not appear so clear cut. Still, the peak hours seem to be higher during sunny weather. This is indicated by the higher 75% quantile and whisker, while the distributions look similar. From the table below we can see that the total bike rents (`sum_count`) during sunny hours is roughly 3 times higher than during cloudy hours, while the occurrence of sunny hours (`sample_n`) is only roughly 2.5 times higher than cloudy hours. Combined with the knowledge from the box plots this indicates that the higher peek count between `1` and `2` might not play a crucial role for total rental count. In addition, we can see that the 25% quantile does not change much, while the 75% quantile increases for better weather. This indicates that the count dispersion also increases with the total count number, which might make it more difficult to predict high count hours.
+  
+  
+Table and plot of values grouped by `weather`:
+```{r}
+# Total bike rentals per hour, grouped by weather
+data %>% group_by(weather) %>% summarise(sum_count = sum(count), sample_n = n())
+
+```
+
+```{r}
+# Total bike rentals per hour vs hour, grouped by weather
+ggplot(data, aes(x = hour, y = count)) +
+  geom_boxplot() +
+  facet_wrap(weather) +
+  labs(title = "Daily distribution of count for each wheather category")
+```
+
+As supposed above, the plot confirms that the daily distributions for good weather (`1` and `2`) are very similar, with the distribution of good weather being shifted upwards slightly. However, the daily distribution during rainy weather (`3`) has a considerably lower first peak and generally lower dispersion during most hours of the day. One reason could be that some people are dependent on the bike rental service and have to use it, no matter if it is raining.
+  
+  
+To get a better understanding of the dataset, we use the `ggpairs()` function to generate a plot matrix of the data. This allows us to quickly identify strong relationships and might raise red flags to watch out for, such as colinearities.
+
+```{r, message = FALSE}
+# Function to add lm and loess estimation to the graphs
+my_fn <- function(data, mapping, ...){
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_point(shape = 1) + 
+    geom_smooth(method=loess, fill="red", color="red", ...) +
+    geom_smooth(method=lm, fill="blue", color="blue", ...)
+  p
+}
+
+# Select plotting data, data has to be split because the plot would not be 
+#   readable
+
+# The split is made between the date variables, because there won't be 
+#   unexpected relationships between the date variables.
+plot_data <- data %>% select(datetime:count)
+
+# Plot pairs
+ggpairs(plot_data, cardinality_threshold = NULL, progress = FALSE,
+        lower = list(continuous = my_fn), 
+        diag = list(continuous = wrap("densityDiag",  color = "blue") ))
+
+# Select plotting data
+
+plot_data <- data %>% select(weather:weekday)
+# Plot pairs
+ggpairs(plot_data, cardinality_threshold = NULL, progress = FALSE,
+        lower = list(continuous = my_fn), 
+        diag = list(continuous = wrap("densityDiag",  color = "blue") ))
+
+# Plot weeky distribution of count
+ggplot(data, aes(x = weekday, y = count)) +
+  geom_boxplot() +
+  geom_violin(alpha = 0.1, fill = "black", color = "#00000033") +
+  labs(title = "Weekly distribution of count")  
+
+# Plot daily distribution of count
+ggplot(data, aes(x = hour, y = count)) +
+  geom_boxplot() +
+  labs(title = "Daily distribution of count")
+
+# Plot box plot of count on holiday and non holiday
+ggplot(data, aes(x = holiday, y = count)) +
+  geom_boxplot() +
+  labs(title = "Box plot of count on holiday and non holiday")
+
+# Plot histogram of count on holiday and non holiday
+ggplot(data, aes(y = count, fill = holiday)) +
+  geom_histogram() +
+  labs(title = "Histogram of count on holiday and non holiday")
+
+```
+
+### Interpretation:
+
+Looking primarily at the `count` column, we can see that there is a clear relationship of rising bike rentals from year 2011 towards year 2012, which may make predictions into 2013 more difficult, because with the limited data we don't know if this is a long lasting trend. For our predictions within 2011 and 2012 this is not a big problem though. We can also see a clear increase of rentals during the summer in variables `datetime`, `seasons`, `year`, and `month`. Further, we have already discussed the distributions for `hour` and `weekday`.
+
+Unexpectedly, the peak counts on `holiday` seem to be lower than on normal days and the distribution seems to be more equally spread. Higher peek counts can also be seen in the `workingday` column. Examining the daily distribution (see below) confirms this and in addition shows that the daily distribution for those days is very different. On 'non working days' and holidays people appear to use the bike throughout the day and not only during the morning and evening to get to work.
+
+For the quantitative variables `temp`, `humidity`, etc. we can see some correlations which might be useful in our model. The wind speed correlation, however, is unexpectedly positive, while there still is a clear cut-off at high wind speeds. This could be subject to further inspection. Further, we can see a very high correlation and tight linear relationship between `temp` and `atemp`. This might cause problems of colinearity and should be considered when estimating the models.
+
+Further, we can clearly identify some relationships between the independent variables. Therefore, it might be beneficial to consider some interaction terms in the modeling process.
+
+Finally, we can see that `count` is heavily positively skewed. Thus, a `log()` transformation might improve prediction results a lot.
+
+```{r}
+# Plot the daily distribution for holiday and working day vs 'other' days
+ggplot(data, aes(x = hour, y = count)) +
+  geom_boxplot() +
+  facet_wrap(holiday) +
+  labs(title = "Daily distribution of bike rentals on holidays and non holidays")
+  
+ggplot(data, aes(x = hour, y = count)) +
+  geom_boxplot() +
+  facet_wrap(workingday) +
+  labs(title = "Daily distribution of bike rentals on working days and non working days")
+```
+
+## Linear regression
+
+The main goal is to obtain predictions for the number of bike rentals. For now, we will use a multiple linear regression to perform this task.
+
+Therefore we split the data into training ("data_train") and testing ("data_test") subsets. We assign the first 60% of the consecutive data points to the "data_train" and the rest to the "data_test". We do not shuffle the data.
+
+```{r}
+# Find the 60% cut off value
+n <- dim(data)[1]
+n_train <- as.integer(0.6*n)
+
+# Split the data into train and test
+data_train <- data[1 : n_train, ]
+data_test <- data[ n_train + 1 : n, ]
+```
+
+**Training and Testing**
+
+What is the benefit of splitting a data set into some ratio of training and testing data points?
+
+**Answer:** Splitting the data set enables us to use the training part for model estimation, while using the testing part for model selection (prediction evaluation). This ensures independence between our estimated coefficients $\hat{\beta}$ and the independent variables $X$ for testing. Effectively it simulates out of sample prediction which, for example, lowers the chance of overfitting. Overfitting on the test set will then, hopefully, be apparent from a large estimation error in the out of sample prediction. Thus, splitting the data helps to correctly evaluate the model prediction and, thus, improves the model selection process.
+
+First we use the train part ("data_train") of the data to estimate multiple linear regression with the following features:
+
+-   month
+-   holiday
+-   weather
+-   temp
+-   humidity
+-   windspeed
+-   year
+-   hour
+
+```{r}
+# Fit model 1
+fit1 <- lm(data = data_train, formula = count ~ month + holiday + weather + 
+             temp + humidity + windspeed + year + hour)
+summary(fit1)
+
+```
+
+Second, we use the train part ("data_train") of the data to estimate multiple linear regression with a smaller set of features:
+
+-   month
+-   year
+-   hour
+
+```{r}
+# Fit model 2
+fit2 <- lm(data = data_train, formula = count ~ month + year + hour)
+summary(fit2)
+
+```
+
+## Model Evaluation and Selection
+
+We now want to test which model performs better and thus might be preferred as a prediction model.
+
+To evaluate and compare the models we calculate the mean squared error (MSE) for each model.
+
+```{r}
+# obtain the predictions for the "data_test" with the model fit1
+lm.predict1 <- tibble( predict.lm(fit1, data_test) )
+
+# Plotting the prediction vs actuals
+colnames(lm.predict1) <- "prediction"
+plot_data <- bind_cols(data_test, lm.predict1) %>%
+    pivot_longer(cols = c(prediction, count), names_to = "count_label", 
+                 values_to = "count_values")
+
+ggplot(plot_data, aes(x = datetime, y = count_values, color = count_label)) + 
+  geom_line() + 
+  scale_color_manual(values=c("black", "brown1")) +
+  labs(title = "Fit1 - prediction vs actual", x = "", y = "Count")
+
+
+# Calculate MSE for the first model
+mse1 <- mean((lm.predict1$prediction - data_test$count)^2, na.rm = TRUE)
+cat("MSE for fit1: ", mse1)
+```
+
+```{r}
+# Obtain the predictions for the "data_test" with the model fit2
+lm.predict2 <- tibble( predict.lm(fit2, data_test) )
+
+
+# Plotting the prediction vs actual
+colnames(lm.predict2) <- "prediction"
+plot_data <- bind_cols(data_test, lm.predict2) %>%
+    pivot_longer(cols = c(prediction, count), names_to = "count_label", 
+                 values_to = "count_values")
+
+ggplot(plot_data, aes(x = datetime, y = count_values, color = count_label)) + 
+  geom_line() + 
+  scale_color_manual(values=c("black", "brown1")) + 
+  labs(title = "Fit2 - prediction vs actual", x = "", y = "Count")
+
+
+# Calculate MSE for the second model
+mse2 <-  mean((lm.predict2$prediction - data_test$count)^2, na.rm = TRUE)
+cat("MSE for fit2: ", mse2)
+```
+
+**Model Selection**
+
+Based on the results, which model do we prefer?
+
+**Answer:** Based on the MSE, the preferred model is `fit1`. Its MSE is `r round(mse2 - mse1)` units lower than that of `fit2`. From the plot we can see that `fit1` catches more of the peak deviations, while `fit2` has a very constant deviation around the mean.
+
+It is also interesting to have some kind of visual inspection of the predictions of the models. One possibility is to use a scatter plot of the errors.
+
+Using the model you have selected, we obtain a scatter plot of true values of "count" against its predictions for the test set ("data_test"). Additionally, we draw the line that represents the points where the X-coordinate is equal to the Y-coordinate. This way we can inspect how the predictions compare to the true values and if there is some pattern etc. in the error:
+
+```{r}
+# select the plotting data
+plot_data <- bind_cols(data_test, lm.predict1)
+
+# Plot the data
+ggplot(plot_data, aes(x = prediction, y = count)) +
+  geom_point(shape = 1) + 
+  geom_abline(intercept = 0, slope = 1, color = "brown1", linetype = 2, 
+              size = 0.8) + 
+  labs(title = "Actual against Predicted values of fit1", x = "Predictions", 
+       y = "Actual count values")
+
+```
+
+**Scatter Plot of Errors**
+
+How would this plot look if we could perfectly predict bike demand?
+
+**Answer:** If all predictions where identical to the true values, the plot would be equal to the plotted line $y=x$.
+
+As the data we analyze is the time series data, it might be also beneficial to plot the predictions and true values against time:
+
+```{r}
+# Selecting the plotting data (first 7 days)
+colnames(lm.predict1) <- "prediction"
+plot_data <- bind_cols(data_test, lm.predict1) %>% 
+  filter(datetime < as.Date(datetime)[1] + 7) %>%
+  pivot_longer(cols = c(prediction, count), names_to = "count_label", 
+               values_to = "count_values")
+
+# Plot the data
+ggplot(plot_data, aes(x = datetime, y = count_values, color = count_label)) + 
+  geom_line() + 
+  scale_color_manual(values=c("black", "brown1")) +
+  labs(title = "Actual vs predicted values for fit1", y = "Count", x = "", 
+       color = "Legend")
+
+```
+
+**Model Performance**
+
+How does the model perform and What are improvement that we could make to enhance predictions?
+
+**Answer:** From the plot, there are two immediate observable failures of the model. First, it fails to model the peaks and troughs, especially during working days. Second, it fails to adjust the model during weekends, where the distribution is uni-modal and not bi-modal. Still, the general shape during working days seems to be caught relatively well by the model. Finally, when looking at the fitted values we can see some negative estimates. This is obviously impossible and the model could be specified to allow only for positive values.
+
+The discrepancy on the weekend can be solved by including an interaction term between `hour` and `workingday`. During the exploratory data analysis stage we found that the daily distribution also changed depending on weather type. Thus, we also include an interaction term between `hour` and `weather`(see `fit3`). However, this resulted in a rank-deficient fit, a higher MSE (compared to `fit4`) and insignificant coefficients, which is why in `fit4` it was excluded again. 
+
+The failure to correctly fit the peaks might be due to insufficient data during the year 2012. We saw that in 2012 rentals were generally higher. We can try to overcome this by splitting the model into 80% train and 20% test data. Nevertheless, this problem seems to be persistent. To overcome the negative fitted values problem, we can try transform `count` into `log(count)`. Fortunately, this transformation also deals with the previous problem of the 2012 predictions. This makes sense, since we know from the distribution analysis that the histogram of `count` is heavily skewed and thus implies that a transformation would support the predictions.
+
+In addition we could try many more transformations and interactions, discretionary or programmatically. However, for the scope of this assignment we stick with `fit4` as our submission model. 
+
+
+```{r test_model3_improvements}
+# Re-split the sample because there were not enough sample points for 2012
+n <- dim(data)[1]
+n_train <- as.integer(0.8*n)
+
+data_train <- data[1 : n_train, ]
+data_test <- data[ n_train + 1 : n, ]
+
+
+# Fitting model 3 with hour * weather, hour * workingday and log(count)
+fit3 <- lm(data = data_train, formula = log(count) ~ month + holiday + temp 
+           + humidity + windspeed + year + hour * workingday + hour * weather)
+summary(fit3)
+
+
+# Calculate the predictions
+lm.predict3 <- tibble( predict.lm(fit3, data_test) )
+colnames(lm.predict3) <- "prediction"
+
+# Calculate MSE, for comparison transform back to count level
+mse3 <- mean( (exp(lm.predict3$prediction) - data_test$count)^2, na.rm = TRUE)
+cat("\nMSE for fit3: ", mse3)
+
+```
+  
+Because the interaction creates some errors, we re-estimate the model without the interaction between `hour` and `weather`.
+
+```{r test_model4_improvements}
+# Plotting the whole series for reference
+ggplot(data_train, aes(x = datetime, y = count)) + 
+  geom_line() +
+  labs(title = "Time series for full 'data_train' series", y = "count", x = "")
+
+
+# Re-split the sample because there were not enough sample points for 2012
+n <- dim(data)[1]
+n_train <- as.integer(0.8*n)
+
+data_train <- data[1 : n_train, ]
+data_test <- data[ n_train + 1 : n, ]
+
+
+# Fitting model 4 with hours * workingday and log(count)
+fit4 <- lm(data = data_train, formula = log(count) ~ month + holiday + weather 
+           + temp + humidity + windspeed + year + hour * workingday)
+summary(fit4)
+
+
+# Calculate the predictions
+lm.predict4 <- tibble( predict.lm(fit4, data_test) )
+
+
+# Data to plot prediction vs real values for complete series
+colnames(lm.predict4) <- "prediction"
+plot_data <- bind_cols(data_test, lm.predict4) %>%
+    # transform the predictions from log back to count
+    mutate(exp_prediction = exp(prediction)) %>%
+    pivot_longer(cols = c(exp_prediction, count), names_to = "count_label", 
+                 values_to = "count_values")
+
+# Data to plot prediction vs real values for first 10 days
+colnames(lm.predict4) <- "prediction"
+plot_data_2 <- bind_cols(data_test, lm.predict4) %>%
+    filter(datetime < as.Date(datetime)[1] + 7) %>%
+    # Transform the predictions from log back to count
+    mutate(exp_prediction = exp(prediction)) %>%
+    pivot_longer(cols = c(exp_prediction, count), names_to = "count_label", 
+                 values_to = "count_values")
+
+# Plot the predictions whole series
+ggplot(plot_data, aes(x = datetime, y = count_values, color = count_label)) + 
+  geom_line() + 
+  scale_color_manual(values=c("black", "brown1")) +
+  labs(title = "Prediction vs actual values for fit4 - whole series", x = "", y = "Count", 
+       color = "Legend")
+
+# Plot the predictions first 10 days
+ggplot(plot_data_2, aes(x = datetime, y = count_values, color = count_label)) + 
+  geom_line() + 
+  scale_color_manual(values=c("black", "brown1")) +
+  labs(title = "Prediction vs actual values for fit4 - 10 days", x = "", y = "Count", 
+       color = "Legend")  
+
+# Plotting fitted vs real values
+plot_data <- cbind(exp(fit4$model$`log(count)`) , exp(fit4$fitted.values) )
+plot.ts(plot_data, plot.type = "single", col = c("blue", "red"), 
+        main = "Fitted vs actual values of fit4")
+
+# Calculate MSE, for comparison transform back to count level
+mse4 <- mean( (exp(lm.predict4$prediction) - data_test$count)^2, na.rm = TRUE)
+cat("MSE for fit4: ", mse4)
+
+
+```
+  
+**Model comparison:** Based on the MSE, `fit4` performs `r round(mse3 - mse4)` units better than `fit3` and `r sprintf("%.0f", (mse1 - mse4))` units better than `fit1`. This means, by introducing the interaction term and log transformation, we could greatly improve the performance of our model. In addition we could try many more transformations and interactions, discretionary or programmatically. However, for the scope of this assignment we stick with `fit4` as our submission model. 
+  
+  
+## Submission
+
+Finally, to submit the model predictions to Kaggle, we can estimate the model on the complete training set and predict on the testing set. We save the precitions in the submission.csv.
+
+```{r}
+# Re-estimate the model using the "data" data set.
+
+fit_submit <- lm(data = data, formula = log(count) ~ month + holiday + 
+                   weather + temp + humidity + windspeed + year + 
+                   hour * workingday)
+
+# Make predictions for the "test" set.
+# We round the final prediction, since the variable bike rentals 
+# belongs to the integers
+lm.predict.test <- tibble(predict.lm(fit_submit, test))
+colnames(lm.predict.test) <- "prediction"
+lm.predict.test$prediction <- round(exp(lm.predict.test$prediction))
+
+# Save predictions to the "submission" data frame as "count"
+submission$count <- lm.predict.test$prediction
+
+# Convert "submission" data frame to a csv file.
+write.csv(submission, file = "sampleSubmission.csv", quote = FALSE, 
+          row.names = FALSE)
+
+```
+  
+  
+  
+  
+  

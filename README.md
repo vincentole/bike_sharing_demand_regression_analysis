@@ -1,6 +1,6 @@
 # Bike Sharing Demand - Regression Analysis
 
-This is a Regression Analysis of the Kaggle Challenge "Bike Sharing Demand".
+This is a regression Analysis of the Kaggle Challenge "Bike Sharing Demand".
 
 This project is for my personal learning, however, anyone who is also studying data science might find this helpful.
 
